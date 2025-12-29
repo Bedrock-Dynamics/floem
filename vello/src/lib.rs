@@ -396,42 +396,64 @@ impl Renderer for VelloRenderer {
         rect: Rect,
         brush: Option<impl Into<BrushRef<'b>>>,
     ) {
-        let rect_width = rect.width().max(1.);
-        let rect_height = rect.height().max(1.);
+        use floem_renderer::tiny_skia::{Mask, MaskType, Paint, Pixmap, Shader, Transform};
+
+        let rect_width = (rect.width().max(1.) * self.window_scale).round() as u32;
+        let rect_height = (rect.height().max(1.) * self.window_scale).round() as u32;
+
+        let Some(mut pixmap) = Pixmap::new(rect_width, rect_height) else {
+            return;
+        };
 
         let svg_size = svg.tree.size();
+        let scale_x = rect_width as f32 / svg_size.width();
+        let scale_y = rect_height as f32 / svg_size.height();
+        let svg_transform = Transform::from_scale(scale_x, scale_y);
 
-        let scale_x = rect_width / f64::from(svg_size.width());
-        let scale_y = rect_height / f64::from(svg_size.height());
+        resvg::render(svg.tree, svg_transform, &mut pixmap.as_mut());
 
-        let translate_x = rect.min_x();
-        let translate_y = rect.min_y();
+        // Apply brush color using alpha masking (same as TinySkia) unless SVG is multicolor.
+        let final_pixmap = if let Some(brush) = brush {
+            let brush = brush.into();
+            if svg_is_multicolor(svg.tree) {
+                pixmap
+            } else if let BrushRef::Solid(color) = brush {
+                let rgba = color.to_rgba8();
+                let (r, g, b, a) = (rgba.r, rgba.g, rgba.b, rgba.a);
 
-        let new = brush.map_or_else(
-            || vello_svg::render_tree(svg.tree),
-            |brush| {
-                let brush = brush.into();
-                alpha_mask_scene(
-                    rect.size(),
-                    |scene| {
-                        scene.append(&vello_svg::render_tree(svg.tree), None);
-                    },
-                    move |scene| {
-                        scene.fill(Fill::NonZero, Affine::IDENTITY, brush, None, &rect);
-                    },
-                )
-            },
-        );
+                let Some(mut colored) = Pixmap::new(rect_width, rect_height) else {
+                    return;
+                };
+                let paint = Paint {
+                    shader: Shader::SolidColor(floem_renderer::tiny_skia::Color::from_rgba8(r, g, b, a)),
+                    ..Default::default()
+                };
+                if let Some(fill_rect) = floem_renderer::tiny_skia::Rect::from_xywh(0.0, 0.0, rect_width as f32, rect_height as f32) {
+                    colored.fill_rect(fill_rect, &paint, Transform::identity(), None);
+                }
+                let mask = Mask::from_pixmap(pixmap.as_ref(), MaskType::Alpha);
+                colored.apply_mask(&mask);
+                colored
+            } else {
+                pixmap
+            }
+        } else {
+            pixmap
+        };
 
-        // Apply transformations to fit the SVG within the provided rectangle
-        self.scene.append(
-            &new,
-            Some(
-                self.transform
-                    .pre_scale_non_uniform(scale_x, scale_y)
-                    .pre_translate((translate_x, translate_y).into())
-                    .then_scale(self.window_scale),
-            ),
+        let mut data = final_pixmap.take();
+        // Vello expects unpremultiplied RGBA; tiny-skia pixmaps are premultiplied.
+        unpremultiply_rgba(&mut data);
+        let blob = Blob::new(Arc::new(data));
+        let image = vello::peniko::Image::new(blob, vello::peniko::ImageFormat::Rgba8, rect_width, rect_height);
+
+        let scale_back = 1.0 / self.window_scale;
+        self.scene.draw_image(
+            &image,
+            self.transform
+                .pre_scale(scale_back)
+                .then_translate((rect.min_x(), rect.min_y()).into())
+                .then_scale(self.window_scale),
         );
     }
 
@@ -657,6 +679,57 @@ fn common_alpha_mask_scene(
     scene.pop_layer();
     scene.pop_layer();
     scene
+}
+
+fn unpremultiply_rgba(data: &mut [u8]) {
+    for px in data.chunks_exact_mut(4) {
+        let alpha = px[3] as u16;
+        if alpha == 0 {
+            px[0] = 0;
+            px[1] = 0;
+            px[2] = 0;
+            continue;
+        }
+        let scale = 255u16;
+        let r = (px[0] as u16 * scale + alpha / 2) / alpha;
+        let g = (px[1] as u16 * scale + alpha / 2) / alpha;
+        let b = (px[2] as u16 * scale + alpha / 2) / alpha;
+        px[0] = r.min(255) as u8;
+        px[1] = g.min(255) as u8;
+        px[2] = b.min(255) as u8;
+    }
+}
+
+/// Check if an SVG tree contains multiple distinct colors (not just black/currentColor).
+fn svg_is_multicolor(tree: &floem_renderer::usvg::Tree) -> bool {
+    use floem_renderer::usvg::{Node, Paint};
+    use std::collections::HashSet;
+
+    fn collect_colors(node: &Node, colors: &mut HashSet<u32>) {
+        if let Node::Path(path) = node {
+            if let Some(fill) = &path.fill() {
+                if let Paint::Color(c) = fill.paint() {
+                    colors.insert(u32::from_be_bytes([c.red, c.green, c.blue, 0]));
+                }
+            }
+            if let Some(stroke) = &path.stroke() {
+                if let Paint::Color(c) = stroke.paint() {
+                    colors.insert(u32::from_be_bytes([c.red, c.green, c.blue, 0]));
+                }
+            }
+        }
+        if let Node::Group(g) = node {
+            for child in g.children() {
+                collect_colors(&child, colors);
+            }
+        }
+    }
+
+    let mut colors = HashSet::new();
+    for child in tree.root().children() {
+        collect_colors(&child, &mut colors);
+    }
+    colors.len() > 1
 }
 
 fn alpha_mask_scene(
