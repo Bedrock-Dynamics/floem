@@ -15,7 +15,7 @@ use peniko::{
     kurbo::{Affine, Point, Rect, Shape},
     Blob, BrushRef, Color,
 };
-use peniko::{Compose, Fill, ImageAlphaType, ImageData, Mix};
+use peniko::{Compose, Fill, Mix};
 use vello::kurbo::Stroke;
 use vello::util::RenderSurface;
 use vello::wgpu::Device;
@@ -34,7 +34,7 @@ pub struct VelloRenderer {
     window_scale: f64,
     transform: Affine,
     capture: bool,
-    font_cache: HashMap<ID, vello::peniko::FontData>,
+    font_cache: HashMap<ID, vello::peniko::Font>,
     adapter: Adapter,
 }
 
@@ -213,13 +213,42 @@ impl Renderer for VelloRenderer {
         brush: impl Into<BrushRef<'b>>,
         stroke: &'s Stroke,
     ) {
-        self.scene.stroke(
-            stroke,
-            self.transform.then_scale(self.window_scale),
-            brush,
-            None,
-            shape,
-        );
+        if stroke.width * self.window_scale < 2. {
+            let brush: BrushRef = brush.into();
+            match &brush {
+                BrushRef::Solid(color) => {
+                    let mut stroke = stroke.clone();
+                    // this special handling is done to make thin strokes look better
+                    stroke.width *= 1.5;
+                    let color = color.multiply_alpha(0.5);
+                    self.scene.stroke(
+                        &stroke,
+                        self.transform.then_scale(self.window_scale),
+                        BrushRef::Solid(color),
+                        None,
+                        shape,
+                    );
+                }
+
+                _ => {
+                    self.scene.stroke(
+                        stroke,
+                        self.transform.then_scale(self.window_scale),
+                        brush,
+                        None,
+                        shape,
+                    );
+                }
+            }
+        } else {
+            self.scene.stroke(
+                stroke,
+                self.transform.then_scale(self.window_scale),
+                brush,
+                None,
+                shape,
+            );
+        }
     }
 
     fn fill<'b>(&mut self, path: &impl Shape, brush: impl Into<BrushRef<'b>>, blur_radius: f64) {
@@ -346,8 +375,8 @@ impl Renderer for VelloRenderer {
         let rect_width = rect.width().max(1.);
         let rect_height = rect.height().max(1.);
 
-        let scale_x = rect_width / img.img.image.width as f64;
-        let scale_y = rect_height / img.img.image.height as f64;
+        let scale_x = rect_width / img.img.width as f64;
+        let scale_y = rect_height / img.img.height as f64;
 
         let translate_x = rect.min_x();
         let translate_y = rect.min_y();
@@ -367,45 +396,64 @@ impl Renderer for VelloRenderer {
         rect: Rect,
         brush: Option<impl Into<BrushRef<'b>>>,
     ) {
-        let rect_width = rect.width().max(1.);
-        let rect_height = rect.height().max(1.);
+        use floem_renderer::tiny_skia::{Mask, MaskType, Paint, Pixmap, Shader, Transform};
+
+        let rect_width = (rect.width().max(1.) * self.window_scale).round() as u32;
+        let rect_height = (rect.height().max(1.) * self.window_scale).round() as u32;
+
+        let Some(mut pixmap) = Pixmap::new(rect_width, rect_height) else {
+            return;
+        };
 
         let svg_size = svg.tree.size();
+        let scale_x = rect_width as f32 / svg_size.width();
+        let scale_y = rect_height as f32 / svg_size.height();
+        let svg_transform = Transform::from_scale(scale_x, scale_y);
 
-        let scale_x = rect_width / f64::from(svg_size.width());
-        let scale_y = rect_height / f64::from(svg_size.height());
+        resvg::render(svg.tree, svg_transform, &mut pixmap.as_mut());
 
-        let translate_x = rect.min_x();
-        let translate_y = rect.min_y();
+        // Apply brush color using alpha masking (same as TinySkia) unless SVG is multicolor.
+        let final_pixmap = if let Some(brush) = brush {
+            let brush = brush.into();
+            if svg_is_multicolor(svg.tree) {
+                pixmap
+            } else if let BrushRef::Solid(color) = brush {
+                let rgba = color.to_rgba8();
+                let (r, g, b, a) = (rgba.r, rgba.g, rgba.b, rgba.a);
 
-        let new = brush.map_or_else(
-            || vello_svg::render_tree(svg.tree),
-            |brush| {
-                let brush = brush.into();
-                let size = Size::new(svg_size.width() as _, svg_size.height() as _);
-                let fill_rect = Rect::from_origin_size(Point::ZERO, size);
+                let Some(mut colored) = Pixmap::new(rect_width, rect_height) else {
+                    return;
+                };
+                let paint = Paint {
+                    shader: Shader::SolidColor(floem_renderer::tiny_skia::Color::from_rgba8(r, g, b, a)),
+                    ..Default::default()
+                };
+                if let Some(fill_rect) = floem_renderer::tiny_skia::Rect::from_xywh(0.0, 0.0, rect_width as f32, rect_height as f32) {
+                    colored.fill_rect(fill_rect, &paint, Transform::identity(), None);
+                }
+                let mask = Mask::from_pixmap(pixmap.as_ref(), MaskType::Alpha);
+                colored.apply_mask(&mask);
+                colored
+            } else {
+                pixmap
+            }
+        } else {
+            pixmap
+        };
 
-                alpha_mask_scene(
-                    size,
-                    |scene| {
-                        scene.append(&vello_svg::render_tree(svg.tree), None);
-                    },
-                    move |scene| {
-                        scene.fill(Fill::NonZero, Affine::IDENTITY, brush, None, &fill_rect);
-                    },
-                )
-            },
-        );
+        let mut data = final_pixmap.take();
+        // Vello expects unpremultiplied RGBA; tiny-skia pixmaps are premultiplied.
+        unpremultiply_rgba(&mut data);
+        let blob = Blob::new(Arc::new(data));
+        let image = vello::peniko::Image::new(blob, vello::peniko::ImageFormat::Rgba8, rect_width, rect_height);
 
-        // Apply transformations to fit the SVG within the provided rectangle
-        self.scene.append(
-            &new,
-            Some(
-                self.transform
-                    .pre_scale_non_uniform(scale_x, scale_y)
-                    .pre_translate((translate_x, translate_y).into())
-                    .then_scale(self.window_scale),
-            ),
+        let scale_back = 1.0 / self.window_scale;
+        self.scene.draw_image(
+            &image,
+            self.transform
+                .pre_scale(scale_back)
+                .then_translate((rect.min_x(), rect.min_y()).into())
+                .then_scale(self.window_scale),
         );
     }
 
@@ -415,24 +463,24 @@ impl Renderer for VelloRenderer {
 
     fn set_z_index(&mut self, _z_index: i32) {}
 
-    fn clip(&mut self, _shape: &impl Shape) {
-        // if shape.bounding_box().is_zero_area() {
-        //     return;
-        // }
-        // self.scene.pop_layer();
-        // self.scene.push_layer(
-        //     vello::peniko::BlendMode::default(),
-        //     1.,
-        //     self.transform.then_scale(self.window_scale),
-        //     shape,
-        // );
+    fn clip(&mut self, shape: &impl Shape) {
+        if shape.bounding_box().is_zero_area() {
+            return;
+        }
+        self.scene.pop_layer();
+        self.scene.push_layer(
+            vello::peniko::BlendMode::default(),
+            1.,
+            self.transform.then_scale(self.window_scale),
+            shape,
+        );
     }
 
     fn clear_clip(&mut self) {
-        // self.scene.pop_layer();
+        self.scene.pop_layer();
     }
 
-    fn finish(&mut self) -> Option<vello::peniko::ImageBrush> {
+    fn finish(&mut self) -> Option<vello::peniko::Image> {
         if self.capture {
             self.render_capture_image()
         } else {
@@ -487,7 +535,7 @@ impl Renderer for VelloRenderer {
 }
 
 impl VelloRenderer {
-    fn render_capture_image(&mut self) -> Option<peniko::ImageBrush> {
+    fn render_capture_image(&mut self) -> Option<peniko::Image> {
         let width_align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1;
         let width = (self.surface.config.width + width_align) & !width_align;
         let height = self.surface.config.height;
@@ -543,7 +591,7 @@ impl VelloRenderer {
             mapped_at_creation: false,
         });
         let bytes_per_row = width * bytes_per_pixel as u32;
-        assert!(bytes_per_row.is_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT));
+        assert!(bytes_per_row % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT == 0);
 
         let mut encoder = self
             .device
@@ -562,7 +610,7 @@ impl VelloRenderer {
         );
         let command_buffer = encoder.finish();
         self.queue.submit(Some(command_buffer));
-        self.device.poll(wgpu::PollType::Wait).ok()?;
+        self.device.poll(wgpu::Maintain::Wait);
 
         let slice = buffer.slice(..);
         let (tx, rx) = sync_channel(1);
@@ -573,8 +621,8 @@ impl VelloRenderer {
                 break r.ok()?;
             }
             if matches!(
-                self.device.poll(wgpu::PollType::Wait).ok()?,
-                wgpu::PollStatus::WaitSucceeded
+                self.device.poll(wgpu::MaintainBase::Wait),
+                wgpu::MaintainResult::Ok
             ) {
                 rx.recv().ok()?.ok()?;
                 break;
@@ -591,13 +639,12 @@ impl VelloRenderer {
             cursor += bytes_per_row as usize;
         }
 
-        Some(vello::peniko::ImageBrush::new(ImageData {
-            data: Blob::new(Arc::new(cropped_buffer)),
-            format: vello::peniko::ImageFormat::Rgba8,
-            alpha_type: ImageAlphaType::AlphaPremultiplied,
-            width: self.surface.config.width,
+        Some(vello::peniko::Image::new(
+            Blob::new(Arc::new(cropped_buffer)),
+            vello::peniko::ImageFormat::Rgba8,
+            self.surface.config.width,
             height,
-        }))
+        ))
     }
 }
 
@@ -619,7 +666,7 @@ fn common_alpha_mask_scene(
 
     scene.push_layer(
         vello::peniko::BlendMode {
-            mix: Mix::Normal,
+            mix: Mix::Clip,
             compose: compose_mode,
         },
         1.,
@@ -632,6 +679,57 @@ fn common_alpha_mask_scene(
     scene.pop_layer();
     scene.pop_layer();
     scene
+}
+
+fn unpremultiply_rgba(data: &mut [u8]) {
+    for px in data.chunks_exact_mut(4) {
+        let alpha = px[3] as u16;
+        if alpha == 0 {
+            px[0] = 0;
+            px[1] = 0;
+            px[2] = 0;
+            continue;
+        }
+        let scale = 255u16;
+        let r = (px[0] as u16 * scale + alpha / 2) / alpha;
+        let g = (px[1] as u16 * scale + alpha / 2) / alpha;
+        let b = (px[2] as u16 * scale + alpha / 2) / alpha;
+        px[0] = r.min(255) as u8;
+        px[1] = g.min(255) as u8;
+        px[2] = b.min(255) as u8;
+    }
+}
+
+/// Check if an SVG tree contains multiple distinct colors (not just black/currentColor).
+fn svg_is_multicolor(tree: &floem_renderer::usvg::Tree) -> bool {
+    use floem_renderer::usvg::{Node, Paint};
+    use std::collections::HashSet;
+
+    fn collect_colors(node: &Node, colors: &mut HashSet<u32>) {
+        if let Node::Path(path) = node {
+            if let Some(fill) = &path.fill() {
+                if let Paint::Color(c) = fill.paint() {
+                    colors.insert(u32::from_be_bytes([c.red, c.green, c.blue, 0]));
+                }
+            }
+            if let Some(stroke) = &path.stroke() {
+                if let Paint::Color(c) = stroke.paint() {
+                    colors.insert(u32::from_be_bytes([c.red, c.green, c.blue, 0]));
+                }
+            }
+        }
+        if let Node::Group(g) = node {
+            for child in g.children() {
+                collect_colors(&child, colors);
+            }
+        }
+    }
+
+    let mut colors = HashSet::new();
+    for child in tree.root().children() {
+        collect_colors(&child, &mut colors);
+    }
+    colors.len() > 1
 }
 
 fn alpha_mask_scene(
@@ -659,7 +757,7 @@ struct GlyphRun<'a> {
 }
 
 impl VelloRenderer {
-    fn get_font(&mut self, font_id: ID) -> vello::peniko::FontData {
+    fn get_font(&mut self, font_id: ID) -> vello::peniko::Font {
         self.font_cache.get(&font_id).cloned().unwrap_or_else(|| {
             let mut font_system = FONT_SYSTEM.lock();
             let font = font_system.get_font(font_id).unwrap();
@@ -668,7 +766,7 @@ impl VelloRenderer {
             let font_index = face.index;
             drop(font_system);
             let font =
-                vello::peniko::FontData::new(Blob::new(Arc::new(font_data.to_vec())), font_index);
+                vello::peniko::Font::new(Blob::new(Arc::new(font_data.to_vec())), font_index);
             self.font_cache.insert(font_id, font.clone());
             font
         })
