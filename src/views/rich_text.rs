@@ -1,8 +1,9 @@
 use std::any::Any;
+use std::mem::swap;
 
 use floem_reactive::create_effect;
 use floem_renderer::{
-    text::{Attrs, AttrsList, AttrsOwned, TextLayout},
+    text::{Attrs, AttrsList, AttrsOwned, Cursor, TextLayout},
     Renderer,
 };
 use peniko::{
@@ -12,15 +13,35 @@ use peniko::{
 };
 use smallvec::{smallvec, SmallVec};
 use taffy::tree::NodeId;
+use winit::keyboard::{Key, SmolStr};
 
 use crate::{
     context::UpdateCx,
+    event::{Event, EventPropagation},
     id::ViewId,
-    style::{Style, TextOverflow},
+    keyboard::KeyEvent,
+    prop_extractor,
+    style::{Selectable, SelectionStyle, Style, TextOverflow},
     unit::PxPct,
     view::View,
-    IntoView,
+    Clipboard, IntoView,
 };
+
+use super::TextCommand;
+
+prop_extractor! {
+    RichTextStyle {
+        text_selectable: Selectable,
+    }
+}
+
+#[derive(Debug, Clone)]
+enum SelectionState {
+    None,
+    Ready(Point),
+    Selecting(Point, Point),
+    Selected(Point, Point),
+}
 
 pub struct RichText {
     id: ViewId,
@@ -29,9 +50,15 @@ pub struct RichText {
     text_overflow: TextOverflow,
     available_width: Option<f32>,
     available_text_layout: Option<TextLayout>,
+    selection_state: SelectionState,
+    selection_range: Option<(Cursor, Cursor)>,
+    selection_style: SelectionStyle,
+    style: RichTextStyle,
 }
 
-pub fn rich_text(text_layout: impl Fn() -> TextLayout + 'static) -> RichText {
+pub fn rich_text(
+    text_layout: impl Fn() -> TextLayout + 'static,
+) -> RichText {
     let id = ViewId::new();
     let text = text_layout();
     create_effect(move |_| {
@@ -45,6 +72,174 @@ pub fn rich_text(text_layout: impl Fn() -> TextLayout + 'static) -> RichText {
         text_overflow: TextOverflow::Wrap,
         available_width: None,
         available_text_layout: None,
+        selection_state: SelectionState::None,
+        selection_range: None,
+        selection_style: Default::default(),
+        style: Default::default(),
+    }
+}
+
+impl RichText {
+    fn effective_text_layout(&self) -> &TextLayout {
+        self.available_text_layout
+            .as_ref()
+            .unwrap_or(&self.text_layout)
+    }
+
+    fn get_hit_point(&self, point: Point) -> Option<Cursor> {
+        let text_node = self.text_node?;
+        let location = self
+            .id
+            .taffy()
+            .borrow()
+            .layout(text_node)
+            .map_or(
+                taffy::Layout::new().location,
+                |layout| layout.location,
+            );
+        self.effective_text_layout().hit(
+            point.x as f32 - location.x,
+            point.y as f32 - location.y,
+        )
+    }
+
+    fn set_selection_range(&mut self) {
+        match self.selection_state {
+            SelectionState::None => {
+                self.selection_range = None;
+            }
+            SelectionState::Selecting(start, end)
+            | SelectionState::Selected(start, end) => {
+                let mut start_cursor = self
+                    .get_hit_point(start)
+                    .expect("Start position is valid");
+                if let Some(mut end_cursor) =
+                    self.get_hit_point(end)
+                {
+                    if start_cursor.line > end_cursor.line
+                        || (start_cursor.line
+                            == end_cursor.line
+                            && start_cursor.index
+                                > end_cursor.index)
+                    {
+                        swap(
+                            &mut start_cursor,
+                            &mut end_cursor,
+                        );
+                    }
+                    self.selection_range =
+                        Some((start_cursor, end_cursor));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Extract selected text from the TextLayout
+    /// line-by-line (RichText doesn't store the
+    /// original string like Label does).
+    fn selected_text(
+        &self,
+        start: &Cursor,
+        end: &Cursor,
+    ) -> String {
+        let tl = self.effective_text_layout();
+        let lines = tl.lines();
+        let mut result = String::new();
+        for i in start.line..=end.line {
+            if i >= lines.len() {
+                break;
+            }
+            let lt = lines[i].text();
+            let from =
+                if i == start.line { start.index } else { 0 };
+            let to =
+                if i == end.line { end.index } else { lt.len() };
+            if from <= to && to <= lt.len() {
+                result.push_str(&lt[from..to]);
+            }
+            if i < end.line {
+                result.push('\n');
+            }
+        }
+        result
+    }
+
+    fn handle_modifier_cmd(
+        &mut self,
+        event: &KeyEvent,
+        character: &SmolStr,
+    ) -> bool {
+        if event.modifiers.is_empty() {
+            return false;
+        }
+
+        let command: TextCommand = (event, character).into();
+
+        match command {
+            TextCommand::Copy => {
+                if let Some((start_c, end_c)) =
+                    &self.selection_range
+                {
+                    let txt =
+                        self.selected_text(start_c, end_c);
+                    if !txt.is_empty() {
+                        let _ = Clipboard::set_contents(txt);
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_key_down(&mut self, event: &KeyEvent) -> bool {
+        match event.key.logical_key {
+            Key::Character(ref ch) => {
+                self.handle_modifier_cmd(event, ch)
+            }
+            _ => false,
+        }
+    }
+
+    fn paint_selection(
+        &self,
+        text_layout: &TextLayout,
+        cx: &mut crate::context::PaintCx,
+    ) {
+        if let Some((start_c, end_c)) = &self.selection_range {
+            let location = self
+                .id
+                .taffy()
+                .borrow()
+                .layout(self.text_node.unwrap())
+                .cloned()
+                .unwrap_or_default()
+                .location;
+            let ss = &self.selection_style;
+            let selection_color = ss.selection_color();
+
+            for run in text_layout.layout_runs() {
+                if let Some((mut start_x, width)) =
+                    run.highlight(*start_c, *end_c)
+                {
+                    start_x += location.x;
+                    let end_x = width + start_x;
+                    let start_y =
+                        location.y as f64 + run.line_top as f64;
+                    let end_y =
+                        start_y + run.line_height as f64;
+                    let rect = Rect::new(
+                        start_x.into(),
+                        start_y,
+                        end_x.into(),
+                        end_y,
+                    )
+                    .to_rounded_rect(ss.corner_radius());
+                    cx.fill(&rect, &selection_color, 0.0);
+                }
+            }
+        }
     }
 }
 
@@ -65,7 +260,11 @@ impl View for RichText {
         .into()
     }
 
-    fn update(&mut self, _cx: &mut UpdateCx, state: Box<dyn Any>) {
+    fn update(
+        &mut self,
+        _cx: &mut UpdateCx,
+        state: Box<dyn Any>,
+    ) {
         if let Ok(state) = state.downcast() {
             self.text_layout = *state;
             self.available_width = None;
@@ -74,13 +273,91 @@ impl View for RichText {
         }
     }
 
-    fn layout(&mut self, cx: &mut crate::context::LayoutCx) -> taffy::tree::NodeId {
+    fn event_before_children(
+        &mut self,
+        _cx: &mut crate::context::EventCx,
+        event: &Event,
+    ) -> EventPropagation {
+        match event {
+            Event::PointerDown(pe) => {
+                if self.style.text_selectable() {
+                    self.selection_range = None;
+                    self.selection_state =
+                        SelectionState::Ready(pe.pos);
+                    self.id.request_layout();
+                }
+            }
+            Event::PointerMove(pme) => {
+                if !self.style.text_selectable() {
+                    if self.selection_range.is_some() {
+                        self.selection_state =
+                            SelectionState::None;
+                        self.selection_range = None;
+                        self.id.request_layout();
+                    }
+                } else {
+                    let (SelectionState::Selecting(start, _)
+                    | SelectionState::Ready(start)) =
+                        self.selection_state
+                    else {
+                        return EventPropagation::Continue;
+                    };
+                    if start.distance(pme.pos).abs() > 2. {
+                        self.selection_state =
+                            SelectionState::Selecting(
+                                start, pme.pos,
+                            );
+                        self.id.request_active();
+                        self.id.request_focus();
+                        self.id.request_layout();
+                    }
+                }
+            }
+            Event::PointerUp(_) => {
+                if let SelectionState::Selecting(start, end) =
+                    self.selection_state
+                {
+                    self.selection_state =
+                        SelectionState::Selected(start, end);
+                } else {
+                    self.selection_state =
+                        SelectionState::None;
+                }
+                self.id.clear_active();
+                self.id.request_layout();
+            }
+            Event::KeyDown(ke) => {
+                if self.handle_key_down(ke) {
+                    return EventPropagation::Stop;
+                }
+            }
+            _ => {}
+        }
+        EventPropagation::Continue
+    }
+
+    fn style_pass(
+        &mut self,
+        cx: &mut crate::context::StyleCx<'_>,
+    ) {
+        self.style.read(cx);
+        if self.selection_style.read(cx) {
+            self.id.request_paint();
+        }
+    }
+
+    fn layout(
+        &mut self,
+        cx: &mut crate::context::LayoutCx,
+    ) -> taffy::tree::NodeId {
         cx.layout_node(self.id(), true, |_cx| {
             let size = self.text_layout.size();
             let width = size.width as f32;
             let mut height = size.height as f32;
 
-            if let Some(t) = self.available_text_layout.as_ref() {
+            if let Some(t) =
+                self.available_text_layout.as_ref()
+            {
                 height = height.max(t.size().height as f32);
             }
 
@@ -95,13 +372,23 @@ impl View for RichText {
             }
             let text_node = self.text_node.unwrap();
 
-            let style = Style::new().width(width).height(height).to_taffy_style();
-            let _ = self.id.taffy().borrow_mut().set_style(text_node, style);
+            let style = Style::new()
+                .width(width)
+                .height(height)
+                .to_taffy_style();
+            let _ = self
+                .id
+                .taffy()
+                .borrow_mut()
+                .set_style(text_node, style);
             vec![text_node]
         })
     }
 
-    fn compute_layout(&mut self, _cx: &mut crate::context::ComputeLayoutCx) -> Option<Rect> {
+    fn compute_layout(
+        &mut self,
+        _cx: &mut crate::context::ComputeLayoutCx,
+    ) -> Option<Rect> {
         let layout = self.id.get_layout().unwrap_or_default();
         let view_state = self.id.state();
         let (padding_left, padding_right) = {
@@ -109,11 +396,15 @@ impl View for RichText {
             let style = view_state.combined_style.builtin();
             let padding_left = match style.padding_left() {
                 PxPct::Px(padding) => padding as f32,
-                PxPct::Pct(pct) => pct as f32 * layout.size.width,
+                PxPct::Pct(pct) => {
+                    pct as f32 * layout.size.width
+                }
             };
             let padding_right = match style.padding_right() {
                 PxPct::Px(padding) => padding as f32,
-                PxPct::Pct(pct) => pct as f32 * layout.size.width,
+                PxPct::Pct(pct) => {
+                    pct as f32 * layout.size.width
+                }
             };
             self.text_overflow = style.text_overflow();
             (padding_left, padding_right)
@@ -124,11 +415,16 @@ impl View for RichText {
         let available_width = layout.size.width - padding;
         if self.text_overflow == TextOverflow::Wrap {
             if width > available_width {
-                if self.available_width != Some(available_width) {
-                    let mut text_layout = self.text_layout.clone();
-                    text_layout.set_size(available_width, f32::MAX);
-                    self.available_text_layout = Some(text_layout);
-                    self.available_width = Some(available_width);
+                if self.available_width != Some(available_width)
+                {
+                    let mut text_layout =
+                        self.text_layout.clone();
+                    text_layout
+                        .set_size(available_width, f32::MAX);
+                    self.available_text_layout =
+                        Some(text_layout);
+                    self.available_width =
+                        Some(available_width);
                     self.id.request_layout();
                 }
             } else {
@@ -139,6 +435,8 @@ impl View for RichText {
                 self.available_width = None;
             }
         }
+
+        self.set_selection_range();
 
         None
     }
@@ -153,8 +451,15 @@ impl View for RichText {
             .cloned()
             .unwrap_or_default()
             .location;
-        let point = Point::new(location.x as f64, location.y as f64);
-        if let Some(text_layout) = self.available_text_layout.as_ref() {
+        let point =
+            Point::new(location.x as f64, location.y as f64);
+        let text_layout = self.effective_text_layout();
+        if cx.app_state.is_focused(&self.id()) {
+            self.paint_selection(text_layout, cx);
+        }
+        if let Some(text_layout) =
+            self.available_text_layout.as_ref()
+        {
             cx.draw_text(text_layout, point);
         } else {
             cx.draw_text(&self.text_layout, point);
@@ -173,7 +478,10 @@ impl<'a> RichSpan<'a> {
         let len = self.text.len();
         RichSpanOwned {
             text: self.text.to_string(),
-            spans: smallvec::smallvec![(0..len, AttrsOwned::new(self.attrs))],
+            spans: smallvec::smallvec![(
+                0..len,
+                AttrsOwned::new(self.attrs)
+            )],
         }
     }
     pub fn color(mut self, color: Color) -> Self {
@@ -181,22 +489,34 @@ impl<'a> RichSpan<'a> {
         self
     }
 
-    pub fn family(mut self, family: &'a [floem_renderer::text::FamilyOwned]) -> RichSpan<'a> {
+    pub fn family(
+        mut self,
+        family: &'a [floem_renderer::text::FamilyOwned],
+    ) -> RichSpan<'a> {
         self.attrs = self.attrs.family(family);
         self
     }
 
-    pub fn stretch(mut self, stretch: floem_renderer::text::Stretch) -> RichSpan<'a> {
+    pub fn stretch(
+        mut self,
+        stretch: floem_renderer::text::Stretch,
+    ) -> RichSpan<'a> {
         self.attrs = self.attrs.stretch(stretch);
         self
     }
 
-    pub fn text_style(mut self, style: floem_renderer::text::Style) -> RichSpan<'a> {
+    pub fn text_style(
+        mut self,
+        style: floem_renderer::text::Style,
+    ) -> RichSpan<'a> {
         self.attrs = self.attrs.style(style);
         self
     }
 
-    pub fn weight(mut self, weight: floem_renderer::text::Weight) -> RichSpan<'a> {
+    pub fn weight(
+        mut self,
+        weight: floem_renderer::text::Weight,
+    ) -> RichSpan<'a> {
         self.attrs = self.attrs.weight(weight);
         self
     }
@@ -209,12 +529,18 @@ impl<'a> RichSpan<'a> {
         self
     }
 
-    pub fn font_size(mut self, font_size: f32) -> RichSpan<'a> {
+    pub fn font_size(
+        mut self,
+        font_size: f32,
+    ) -> RichSpan<'a> {
         self.attrs = self.attrs.font_size(font_size);
         self
     }
 
-    pub fn raw_weight(mut self, weight: u16) -> RichSpan<'a> {
+    pub fn raw_weight(
+        mut self,
+        weight: u16,
+    ) -> RichSpan<'a> {
         self.attrs = self.attrs.raw_weight(weight);
         self
     }
@@ -229,7 +555,8 @@ impl IntoView for RichSpanOwned {
 
     fn into_view(self) -> Self::V {
         let mut layout = TextLayout::new();
-        let mut attrs_list = AttrsList::new(Attrs::new().color(palette::css::BLACK));
+        let mut attrs_list =
+            AttrsList::new(Attrs::new().color(palette::css::BLACK));
         for span in self.spans {
             attrs_list.add_span(span.0, span.1.as_attrs());
         }
@@ -259,7 +586,10 @@ where
             text: self.text.to_string() + rhs.text,
             spans: smallvec![
                 (0..self_len, AttrsOwned::new(self.attrs)),
-                (self_len..self_len + rhs_len, AttrsOwned::new(rhs.attrs)),
+                (
+                    self_len..self_len + rhs_len,
+                    AttrsOwned::new(rhs.attrs)
+                ),
             ],
         }
     }
@@ -276,7 +606,9 @@ impl<'a> std::ops::Add<&'a str> for RichSpan<'a> {
                 (0..self_len, AttrsOwned::new(self.attrs)),
                 (
                     self_len..self_len + rhs_len,
-                    AttrsOwned::new(Attrs::new().color(palette::css::BLACK))
+                    AttrsOwned::new(
+                        Attrs::new().color(palette::css::BLACK)
+                    )
                 ),
             ],
         }
@@ -294,7 +626,9 @@ impl std::ops::Add<String> for RichSpan<'_> {
                 (0..self_len, AttrsOwned::new(self.attrs)),
                 (
                     self_len..self_len + rhs_len,
-                    AttrsOwned::new(Attrs::new().color(palette::css::BLACK))
+                    AttrsOwned::new(
+                        Attrs::new().color(palette::css::BLACK)
+                    )
                 ),
             ],
         }
@@ -310,8 +644,10 @@ where
         let rhs: RichSpan = rhs.into();
         let self_len = self.text.len();
         let new_text = self.text + rhs.text;
-        self.spans
-            .push((self_len..new_text.len(), AttrsOwned::new(rhs.attrs)));
+        self.spans.push((
+            self_len..new_text.len(),
+            AttrsOwned::new(rhs.attrs),
+        ));
         Self {
             text: new_text,
             spans: self.spans,
@@ -326,7 +662,9 @@ impl std::ops::Add<&str> for RichSpanOwned {
         let new_text = self.text + rhs;
         self.spans.push((
             self_len..new_text.len(),
-            AttrsOwned::new(Attrs::new().color(palette::css::BLACK)),
+            AttrsOwned::new(
+                Attrs::new().color(palette::css::BLACK),
+            ),
         ));
         Self {
             text: new_text,
@@ -342,7 +680,9 @@ impl std::ops::Add<String> for RichSpanOwned {
         let new_text = self.text + &rhs;
         self.spans.push((
             self_len..new_text.len(),
-            AttrsOwned::new(Attrs::new().color(palette::css::BLACK)),
+            AttrsOwned::new(
+                Attrs::new().color(palette::css::BLACK),
+            ),
         ));
         Self {
             text: new_text,
@@ -355,11 +695,13 @@ impl std::ops::Add for RichSpanOwned {
 
     fn add(mut self, rhs: Self) -> Self::Output {
         let self_len = self.text.len();
-        self.spans.extend(
-            rhs.spans
-                .into_iter()
-                .map(|span| ((span.0.start + self_len)..(span.0.end + self_len), span.1)),
-        );
+        self.spans.extend(rhs.spans.into_iter().map(|span| {
+            (
+                (span.0.start + self_len)
+                    ..(span.0.end + self_len),
+                span.1,
+            )
+        }));
         Self {
             text: self.text + &rhs.text,
             spans: self.spans,
@@ -423,15 +765,24 @@ where
         self.color(palette::css::PINK)
     }
 
-    fn family(self, family: &'a [crate::text::FamilyOwned]) -> RichSpan<'a> {
+    fn family(
+        self,
+        family: &'a [crate::text::FamilyOwned],
+    ) -> RichSpan<'a> {
         let span: RichSpan = self.into();
         span.family(family)
     }
-    fn stretch(self, stretch: crate::text::Stretch) -> RichSpan<'a> {
+    fn stretch(
+        self,
+        stretch: crate::text::Stretch,
+    ) -> RichSpan<'a> {
         let span: RichSpan = self.into();
         span.stretch(stretch)
     }
-    fn text_style(self, style: crate::text::Style) -> RichSpan<'a> {
+    fn text_style(
+        self,
+        style: crate::text::Style,
+    ) -> RichSpan<'a> {
         let span: RichSpan = self.into();
         span.text_style(style)
     }
@@ -442,7 +793,10 @@ where
         self.text_style(crate::text::Style::Oblique)
     }
 
-    fn weight(self, weight: crate::text::Weight) -> RichSpan<'a> {
+    fn weight(
+        self,
+        weight: crate::text::Weight,
+    ) -> RichSpan<'a> {
         let span: RichSpan = self.into();
         span.weight(weight)
     }
@@ -477,7 +831,10 @@ where
         span.font_size(font_size)
     }
 
-    fn line_height(self, line_height: crate::text::LineHeightValue) -> RichSpan<'a> {
+    fn line_height(
+        self,
+        line_height: crate::text::LineHeightValue,
+    ) -> RichSpan<'a> {
         let span: RichSpan = self.into();
         span.line_height(line_height)
     }
