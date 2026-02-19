@@ -198,6 +198,10 @@ pub(crate) mod id;
 mod inspector;
 pub mod keyboard;
 pub mod menu;
+/// Re-export muda accelerator types so callers can
+/// construct `Accelerator` values for `MenuItem::accelerator()`.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub use muda::accelerator as menu_accelerator;
 mod nav;
 pub mod pointer;
 mod profiler;
