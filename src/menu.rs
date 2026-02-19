@@ -59,7 +59,7 @@ impl Menu {
                         item.id.clone(),
                         item.title.clone(),
                         item.enabled,
-                        None,
+                        item.accelerator.clone(),
                     ));
                 }
                 MenuEntry::SubMenu(floem_menu) => {
@@ -83,7 +83,7 @@ impl Menu {
                         item.id.clone(),
                         item.title.clone(),
                         item.enabled,
-                        None,
+                        item.accelerator.clone(),
                     ));
                 }
                 MenuEntry::SubMenu(floem_menu) => {
@@ -100,6 +100,11 @@ pub struct MenuItem {
     pub(crate) title: String,
     pub(crate) enabled: bool,
     pub(crate) action: Option<Box<dyn Fn()>>,
+    /// Native keyboard accelerator shown in the menu item.
+    /// Only used on macOS and Windows where muda renders
+    /// native menu bars.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    pub(crate) accelerator: Option<muda::accelerator::Accelerator>,
 }
 
 impl From<MenuItem> for MenuEntry {
@@ -117,6 +122,8 @@ impl MenuItem {
             title: title.into(),
             enabled: true,
             action: None,
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            accelerator: None,
         }
     }
 
@@ -127,6 +134,18 @@ impl MenuItem {
 
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
+        self
+    }
+
+    /// Set a native keyboard accelerator for this menu item.
+    ///
+    /// On macOS this renders as the right-aligned shortcut
+    /// (e.g. Cmd+S). On Windows it registers an accelerator
+    /// table entry. On Linux this is a no-op (menus use the
+    /// Floem popout which embeds shortcuts in the title).
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    pub fn accelerator(mut self, accel: muda::accelerator::Accelerator) -> Self {
+        self.accelerator = Some(accel);
         self
     }
 }
