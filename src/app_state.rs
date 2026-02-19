@@ -317,6 +317,33 @@ impl AppState {
         }
     }
 
+    /// Extract action closures from a window menu into the
+    /// `window_menu` action map so `menu_action()` can
+    /// dispatch them when muda fires an event.
+    pub(crate) fn update_window_menu(&mut self, menu: &mut Menu) {
+        self.window_menu.clear();
+        self.collect_window_menu_actions(menu);
+    }
+
+    fn collect_window_menu_actions(&mut self, menu: &mut Menu) {
+        if let Some(action) = menu.item.action.take() {
+            self.window_menu.insert(menu.item.id.clone(), action);
+        }
+        for child in menu.children.iter_mut() {
+            match child {
+                crate::menu::MenuEntry::Separator => {}
+                crate::menu::MenuEntry::Item(item) => {
+                    if let Some(action) = item.action.take() {
+                        self.window_menu.insert(item.id.clone(), action);
+                    }
+                }
+                crate::menu::MenuEntry::SubMenu(m) => {
+                    self.collect_window_menu_actions(m);
+                }
+            }
+        }
+    }
+
     pub(crate) fn focus_changed(&mut self, old: Option<ViewId>, new: Option<ViewId>) {
         if let Some(id) = new {
             // To apply the styles of the Focus selector

@@ -1155,23 +1155,31 @@ impl WindowHandle {
         })
     }
 
-    fn update_window_menu(&mut self, _menu: Menu) {
-        // if let Some(action) = menu.item.action.take() {
-        //     self.window_menu.insert(menu.item.id as u32, action);
-        // }
-        // for child in menu.children {
-        //     match child {
-        //         crate::menu::MenuEntry::Separator => {}
-        //         crate::menu::MenuEntry::Item(mut item) => {
-        //             if let Some(action) = item.action.take() {
-        //                 self.window_menu.insert(item.id as u32, action);
-        //             }
-        //         }
-        //         crate::menu::MenuEntry::SubMenu(m) => {
-        //             self.update_window_menu(m);
-        //         }
-        //     }
-        // }
+    fn update_window_menu(&mut self, mut menu: Menu) {
+        // Extract action closures into the dispatch map
+        self.app_state.update_window_menu(&mut menu);
+
+        // Install the native menu bar on macOS / Windows
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        {
+            let platform_menu = menu.platform_menu();
+
+            #[cfg(target_os = "macos")]
+            {
+                platform_menu.init_for_nsapp();
+            }
+
+            #[cfg(target_os = "windows")]
+            if let Some(window) = self.window.as_ref() {
+                use winit::raw_window_handle::HasWindowHandle;
+                if let Ok(handle) = window.window_handle() {
+                    if let winit::raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() {
+                        let hwnd = h.hwnd.get() as isize;
+                        let _ = platform_menu.init_for_hwnd(hwnd);
+                    }
+                }
+            }
+        }
     }
 
     fn set_cursor(&mut self) {
