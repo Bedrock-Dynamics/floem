@@ -17,7 +17,7 @@ use winit::keyboard::{Key, SmolStr};
 
 use crate::{
     context::UpdateCx,
-    event::{Event, EventPropagation},
+    event::{Event, EventListener, EventPropagation},
     id::ViewId,
     keyboard::KeyEvent,
     prop_extractor,
@@ -27,7 +27,7 @@ use crate::{
     Clipboard, IntoView,
 };
 
-use super::TextCommand;
+use super::{Decorators, TextCommand};
 
 prop_extractor! {
     RichTextStyle {
@@ -77,6 +77,12 @@ pub fn rich_text(
         selection_style: Default::default(),
         style: Default::default(),
     }
+    .on_event_cont(
+        EventListener::FocusLost,
+        move |_| {
+            id.request_layout();
+        },
+    )
 }
 
 impl RichText {
@@ -397,13 +403,15 @@ impl View for RichText {
             let padding_left = match style.padding_left() {
                 PxPct::Px(padding) => padding as f32,
                 PxPct::Pct(pct) => {
-                    pct as f32 * layout.size.width
+                    (pct / 100.) as f32
+                        * layout.size.width
                 }
             };
             let padding_right = match style.padding_right() {
                 PxPct::Px(padding) => padding as f32,
                 PxPct::Pct(pct) => {
-                    pct as f32 * layout.size.width
+                    (pct / 100.) as f32
+                        * layout.size.width
                 }
             };
             self.text_overflow = style.text_overflow();
@@ -446,23 +454,36 @@ impl View for RichText {
         let location = self
             .id
             .taffy()
-            .borrow_mut()
+            .borrow()
             .layout(text_node)
             .cloned()
             .unwrap_or_default()
             .location;
         let point =
             Point::new(location.x as f64, location.y as f64);
-        let text_layout = self.effective_text_layout();
-        if cx.app_state.is_focused(&self.id()) {
-            self.paint_selection(text_layout, cx);
-        }
+
+        // Draw text first
         if let Some(text_layout) =
             self.available_text_layout.as_ref()
         {
             cx.draw_text(text_layout, point);
         } else {
             cx.draw_text(&self.text_layout, point);
+        }
+
+        // Paint selection highlight on top of text.
+        // Show selection when focused OR mid-drag
+        // (focus may not have propagated yet in the
+        // same frame).
+        let show_selection =
+            cx.app_state.is_focused(&self.id())
+                || matches!(
+                    self.selection_state,
+                    SelectionState::Selecting(_, _)
+                );
+        if show_selection {
+            let text_layout = self.effective_text_layout();
+            self.paint_selection(text_layout, cx);
         }
     }
 }
