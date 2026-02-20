@@ -1184,7 +1184,12 @@ impl WindowHandle {
                 if let Ok(handle) = window.window_handle() {
                     if let winit::raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() {
                         let hwnd = h.hwnd.get() as isize;
-                        let _ = platform_menu.init_for_hwnd(hwnd);
+                        // SAFETY: hwnd is obtained from a valid
+                        // winit WindowHandle that is alive for
+                        // the duration of this window.
+                        let _ = unsafe {
+                            platform_menu.init_for_hwnd(hwnd)
+                        };
                     }
                 }
             }
