@@ -38,6 +38,11 @@ pub(crate) struct ApplicationHandle {
     pub(crate) event_listener: Option<Box<AppEventCallback>>,
     pub(crate) gpu_resources: Option<GpuResources>,
     pub(crate) config: AppConfig,
+    /// Retains the native menu bar so that muda's MenuChild
+    /// objects stay alive for the lifetime of the application.
+    /// Without this, NSMenuItem ivars hold dangling pointers.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    native_menu: Option<muda::Menu>,
 }
 
 impl ApplicationHandle {
@@ -48,6 +53,8 @@ impl ApplicationHandle {
             event_listener: None,
             gpu_resources: None,
             config,
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            native_menu: None,
         }
     }
 
@@ -478,6 +485,16 @@ impl ApplicationHandle {
 
     fn close_window(&mut self, window_id: WindowId, event_loop: &dyn ActiveEventLoop) {
         if let Some(handle) = self.window_handles.get_mut(&window_id) {
+            // Transfer native menu ownership before
+            // destroying the window handle. On macOS
+            // with exit_on_close=false, the app stays
+            // alive after last window close — the menu
+            // must outlive all windows.
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            if let Some(menu) = handle.native_menu.take() {
+                self.native_menu = Some(menu);
+            }
+
             handle.window = None;
             handle.destroy();
         }
@@ -507,6 +524,15 @@ impl ApplicationHandle {
         for (window_id, handle) in self.window_handles.iter_mut() {
             handle.process_update();
             while process_window_updates(window_id) {}
+
+            // Transfer native menu ownership from
+            // WindowHandle to ApplicationHandle so
+            // the muda::Menu (and its MenuChild objects)
+            // outlives any individual window.
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            if let Some(menu) = handle.native_menu.take() {
+                self.native_menu = Some(menu);
+            }
         }
     }
 
@@ -556,5 +582,22 @@ impl ApplicationHandle {
             self.handle_updates_for_all_windows();
         }
         self.fire_timer(event_loop);
+    }
+}
+
+impl Drop for ApplicationHandle {
+    fn drop(&mut self) {
+        // Detach the native menu before muda::Menu is
+        // dropped. On macOS, NSApp retains NSMenuItems
+        // independently of Rust ownership — we must call
+        // remove_for_nsapp() to release them before
+        // MenuChild objects are freed. On Windows, muda's
+        // own Drop impl handles cleanup
+        // (RemoveWindowSubclass + SetMenu(null)), so just
+        // dropping the Menu is sufficient.
+        #[cfg(target_os = "macos")]
+        if let Some(menu) = self.native_menu.take() {
+            menu.remove_for_nsapp();
+        }
     }
 }

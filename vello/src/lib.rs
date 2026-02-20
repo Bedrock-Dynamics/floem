@@ -425,10 +425,17 @@ impl Renderer for VelloRenderer {
                     return;
                 };
                 let paint = Paint {
-                    shader: Shader::SolidColor(floem_renderer::tiny_skia::Color::from_rgba8(r, g, b, a)),
+                    shader: Shader::SolidColor(floem_renderer::tiny_skia::Color::from_rgba8(
+                        r, g, b, a,
+                    )),
                     ..Default::default()
                 };
-                if let Some(fill_rect) = floem_renderer::tiny_skia::Rect::from_xywh(0.0, 0.0, rect_width as f32, rect_height as f32) {
+                if let Some(fill_rect) = floem_renderer::tiny_skia::Rect::from_xywh(
+                    0.0,
+                    0.0,
+                    rect_width as f32,
+                    rect_height as f32,
+                ) {
                     colored.fill_rect(fill_rect, &paint, Transform::identity(), None);
                 }
                 let mask = Mask::from_pixmap(pixmap.as_ref(), MaskType::Alpha);
@@ -445,7 +452,12 @@ impl Renderer for VelloRenderer {
         // Vello expects unpremultiplied RGBA; tiny-skia pixmaps are premultiplied.
         unpremultiply_rgba(&mut data);
         let blob = Blob::new(Arc::new(data));
-        let image = vello::peniko::Image::new(blob, vello::peniko::ImageFormat::Rgba8, rect_width, rect_height);
+        let image = vello::peniko::Image::new(
+            blob,
+            vello::peniko::ImageFormat::Rgba8,
+            rect_width,
+            rect_height,
+        );
 
         let scale_back = 1.0 / self.window_scale;
         self.scene.draw_image(

@@ -81,6 +81,8 @@ pub(crate) struct WindowHandle {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub(crate) context_menu: RwSignal<Option<(Menu, Point, bool)>>,
     dropper_file: Option<PathBuf>,
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    pub(crate) native_menu: Option<muda::Menu>,
 }
 
 impl WindowHandle {
@@ -193,6 +195,8 @@ impl WindowHandle {
             context_menu,
             last_pointer_down: None,
             dropper_file: None,
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            native_menu: None,
         };
         if paint_state_initialized {
             window_handle.init_renderer(gpu_resources);
@@ -1159,7 +1163,12 @@ impl WindowHandle {
         // Extract action closures into the dispatch map
         self.app_state.update_window_menu(&mut menu);
 
-        // Install the native menu bar on macOS / Windows
+        // Install the native menu bar on macOS / Windows.
+        // IMPORTANT: We must retain the muda::Menu so that
+        // the MenuChild objects it owns stay alive. muda
+        // stores raw pointers on NSMenuItem ivars; dropping
+        // the Menu frees the MenuChild while macOS still
+        // holds the native menu items → use-after-free.
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
             let platform_menu = menu.platform_menu();
@@ -1179,6 +1188,8 @@ impl WindowHandle {
                     }
                 }
             }
+
+            self.native_menu = Some(platform_menu);
         }
     }
 
