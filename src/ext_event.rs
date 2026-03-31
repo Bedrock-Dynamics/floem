@@ -1,9 +1,15 @@
 use std::{cell::Cell, collections::VecDeque, sync::Arc};
 
 use floem_reactive::{
-    create_effect, create_rw_signal, untrack, with_scope, ReadSignal, RwSignal, Scope, SignalGet,
+    create_effect, create_rw_signal, untrack,
+    with_scope, ReadSignal, RwSignal, Scope,
     SignalUpdate, SignalWith, WriteSignal,
 };
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    feature = "tokio"
+))]
+use floem_reactive::SignalGet;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::{

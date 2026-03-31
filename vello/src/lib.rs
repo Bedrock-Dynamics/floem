@@ -20,9 +20,13 @@ use peniko::{Compose, Fill, Mix};
 use vello::kurbo::Stroke;
 use vello::util::RenderSurface;
 use vello::wgpu::Device;
-use vello::{AaConfig, RendererOptions, Scene};
+use vello::{RendererOptions, Scene};
+#[cfg(not(target_arch = "wasm32"))]
+use vello::AaConfig;
 use wgpu::util::TextureBlitter;
-use wgpu::{Adapter, DeviceType, Queue, TextureAspect, TextureFormat};
+#[cfg(not(target_arch = "wasm32"))]
+use wgpu::TextureAspect;
+use wgpu::{Adapter, DeviceType, Queue, TextureFormat};
 
 pub struct VelloRenderer {
     device: Device,
