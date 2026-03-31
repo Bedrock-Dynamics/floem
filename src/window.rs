@@ -53,10 +53,26 @@ impl Default for WindowConfig {
             transparent: false,
             fullscreen: None,
             window_icon: None,
-            title: std::env::current_exe()
-                .ok()
-                .and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()))
-                .unwrap_or("Floem Window".to_string()),
+            title: {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    std::env::current_exe()
+                        .ok()
+                        .and_then(|p| {
+                            p.file_name().map(|f| {
+                                f.to_string_lossy()
+                                    .into_owned()
+                            })
+                        })
+                        .unwrap_or_else(|| {
+                            "Floem Window".to_string()
+                        })
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    "Floem Window".to_string()
+                }
+            },
             enabled_buttons: WindowButtons::all(),
             resizable: true,
             undecorated: false,

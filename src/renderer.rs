@@ -88,10 +88,14 @@ impl Renderer {
     ) -> Self {
         let size = Size::new(size.width.max(1.0), size.height.max(1.0));
 
-        let force_tiny_skia = std::env::var("FLOEM_FORCE_TINY_SKIA")
-            .ok()
-            .map(|val| val.as_str() == "1")
-            .unwrap_or(false);
+        #[cfg(not(target_arch = "wasm32"))]
+        let force_tiny_skia =
+            std::env::var("FLOEM_FORCE_TINY_SKIA")
+                .ok()
+                .map(|val| val.as_str() == "1")
+                .unwrap_or(false);
+        #[cfg(target_arch = "wasm32")]
+        let force_tiny_skia = false;
 
         #[cfg(feature = "vello")]
         let vger_err = if !force_tiny_skia {
