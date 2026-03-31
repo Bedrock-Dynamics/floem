@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::mem;
 use std::num::NonZero;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::sync_channel;
 use std::sync::Arc;
 
@@ -495,9 +496,17 @@ impl Renderer for VelloRenderer {
         self.scene.pop_layer();
     }
 
-    fn finish(&mut self) -> Option<vello::peniko::ImageData> {
+    fn finish(
+        &mut self,
+    ) -> Option<vello::peniko::ImageData> {
         if self.capture {
-            self.render_capture_image()
+            #[cfg(not(target_arch = "wasm32"))]
+            return self.render_capture_image();
+            // GPU readback screenshots are not
+            // supported on wasm32 — would require
+            // async buffer mapping via wasm-bindgen.
+            #[cfg(target_arch = "wasm32")]
+            return None;
         } else {
             if let Ok(surface_texture) = self.surface.surface.get_current_texture() {
                 self.renderer
@@ -549,8 +558,11 @@ impl Renderer for VelloRenderer {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl VelloRenderer {
-    fn render_capture_image(&mut self) -> Option<peniko::ImageData> {
+    fn render_capture_image(
+        &mut self,
+    ) -> Option<peniko::ImageData> {
         let width_align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1;
         let width = (self.surface.config.width + width_align) & !width_align;
         let height = self.surface.config.height;
