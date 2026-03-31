@@ -34,7 +34,7 @@ pub struct VelloRenderer {
     window_scale: f64,
     transform: Affine,
     capture: bool,
-    font_cache: HashMap<ID, vello::peniko::Font>,
+    font_cache: HashMap<ID, vello::peniko::FontData>,
     adapter: Adapter,
 }
 
@@ -303,6 +303,7 @@ impl Renderer for VelloRenderer {
         clip: &impl Shape,
     ) {
         self.scene.push_layer(
+            Fill::NonZero,
             blend,
             alpha,
             self.transform.then_scale(self.window_scale) * transform,
@@ -452,12 +453,13 @@ impl Renderer for VelloRenderer {
         // Vello expects unpremultiplied RGBA; tiny-skia pixmaps are premultiplied.
         unpremultiply_rgba(&mut data);
         let blob = Blob::new(Arc::new(data));
-        let image = vello::peniko::Image::new(
-            blob,
-            vello::peniko::ImageFormat::Rgba8,
-            rect_width,
-            rect_height,
-        );
+        let image = vello::peniko::ImageData {
+            data: blob,
+            format: vello::peniko::ImageFormat::Rgba8,
+            alpha_type: vello::peniko::ImageAlphaType::Alpha,
+            width: rect_width,
+            height: rect_height,
+        };
 
         let scale_back = 1.0 / self.window_scale;
         self.scene.draw_image(
@@ -481,6 +483,7 @@ impl Renderer for VelloRenderer {
         }
         self.scene.pop_layer();
         self.scene.push_layer(
+            Fill::NonZero,
             vello::peniko::BlendMode::default(),
             1.,
             self.transform.then_scale(self.window_scale),
@@ -492,7 +495,7 @@ impl Renderer for VelloRenderer {
         self.scene.pop_layer();
     }
 
-    fn finish(&mut self) -> Option<vello::peniko::Image> {
+    fn finish(&mut self) -> Option<vello::peniko::ImageData> {
         if self.capture {
             self.render_capture_image()
         } else {
@@ -547,7 +550,7 @@ impl Renderer for VelloRenderer {
 }
 
 impl VelloRenderer {
-    fn render_capture_image(&mut self) -> Option<peniko::Image> {
+    fn render_capture_image(&mut self) -> Option<peniko::ImageData> {
         let width_align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1;
         let width = (self.surface.config.width + width_align) & !width_align;
         let height = self.surface.config.height;
@@ -622,7 +625,7 @@ impl VelloRenderer {
         );
         let command_buffer = encoder.finish();
         self.queue.submit(Some(command_buffer));
-        self.device.poll(wgpu::Maintain::Wait);
+        self.device.poll(wgpu::PollType::wait_indefinitely()).ok();
 
         let slice = buffer.slice(..);
         let (tx, rx) = sync_channel(1);
@@ -632,10 +635,11 @@ impl VelloRenderer {
             if let Ok(r) = rx.try_recv() {
                 break r.ok()?;
             }
-            if matches!(
-                self.device.poll(wgpu::MaintainBase::Wait),
-                wgpu::MaintainResult::Ok
-            ) {
+            if self
+                .device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .map_or(false, |s| s.wait_finished())
+            {
                 rx.recv().ok()?.ok()?;
                 break;
             }
@@ -651,12 +655,13 @@ impl VelloRenderer {
             cursor += bytes_per_row as usize;
         }
 
-        Some(vello::peniko::Image::new(
-            Blob::new(Arc::new(cropped_buffer)),
-            vello::peniko::ImageFormat::Rgba8,
-            self.surface.config.width,
+        Some(vello::peniko::ImageData {
+            data: Blob::new(Arc::new(cropped_buffer)),
+            format: vello::peniko::ImageFormat::Rgba8,
+            alpha_type: vello::peniko::ImageAlphaType::Alpha,
+            width: self.surface.config.width,
             height,
-        ))
+        })
     }
 }
 
@@ -668,6 +673,7 @@ fn common_alpha_mask_scene(
 ) -> Scene {
     let mut scene = Scene::new();
     scene.push_layer(
+        Fill::NonZero,
         Mix::Normal,
         1.0,
         Affine::IDENTITY,
@@ -677,8 +683,9 @@ fn common_alpha_mask_scene(
     alpha_mask(&mut scene);
 
     scene.push_layer(
+        Fill::NonZero,
         vello::peniko::BlendMode {
-            mix: Mix::Clip,
+            mix: Mix::Normal,
             compose: compose_mode,
         },
         1.,
@@ -769,7 +776,7 @@ struct GlyphRun<'a> {
 }
 
 impl VelloRenderer {
-    fn get_font(&mut self, font_id: ID) -> vello::peniko::Font {
+    fn get_font(&mut self, font_id: ID) -> vello::peniko::FontData {
         self.font_cache.get(&font_id).cloned().unwrap_or_else(|| {
             let mut font_system = FONT_SYSTEM.lock();
             let font = font_system.get_font(font_id).unwrap();
@@ -778,7 +785,7 @@ impl VelloRenderer {
             let font_index = face.index;
             drop(font_system);
             let font =
-                vello::peniko::Font::new(Blob::new(Arc::new(font_data.to_vec())), font_index);
+                vello::peniko::FontData::new(Blob::new(Arc::new(font_data.to_vec())), font_index);
             self.font_cache.insert(font_id, font.clone());
             font
         })

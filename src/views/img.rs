@@ -102,14 +102,14 @@ impl ImageStyle {
 /// Holds the data needed for [img] view fn to display images.
 pub struct Img {
     id: ViewId,
-    img: Option<peniko::Image>,
+    img: Option<peniko::ImageData>,
     img_hash: Option<Vec<u8>>,
     content_node: Option<NodeId>,
 }
 
 /// A view that can display an image and controls its position.
 ///
-/// It takes function that produce `Vec<u8>` and will convert it into [Image](peniko::Image).
+/// It takes function that produce `Vec<u8>` and will convert it into [ImageData](peniko::ImageData).
 ///
 /// ### Example:
 /// ```rust
@@ -158,13 +158,19 @@ pub fn img(image: impl Fn() -> Vec<u8> + 'static) -> Img {
     let height = image.as_ref().map_or(0, |img| img.height());
     let data = Arc::new(image.map_or(Default::default(), |img| img.into_rgba8().into_vec()));
     let blob = Blob::new(data);
-    let image = peniko::Image::new(blob, peniko::ImageFormat::Rgba8, width, height);
+    let image = peniko::ImageData {
+        data: blob,
+        format: peniko::ImageFormat::Rgba8,
+        alpha_type: peniko::ImageAlphaType::Alpha,
+        width,
+        height,
+    };
     img_dynamic(move || image.clone())
 }
 
 /// A view that can display an image and controls its position.
 ///
-/// It takes function that returns [`PathBuf`] and will convert it into [`Image`](peniko::Image).
+/// It takes function that returns [`PathBuf`] and will convert it into [`ImageData`](peniko::ImageData).
 ///
 /// ### Example:
 /// ```rust
@@ -186,11 +192,17 @@ pub fn img_from_path(image: impl Fn() -> PathBuf + 'static) -> Img {
     let height = image.as_ref().map_or(0, |img| img.height());
     let data = Arc::new(image.map_or(Default::default(), |img| img.into_rgba8().into_vec()));
     let blob = Blob::new(data);
-    let image = peniko::Image::new(blob, peniko::ImageFormat::Rgba8, width, height);
+    let image = peniko::ImageData {
+        data: blob,
+        format: peniko::ImageFormat::Rgba8,
+        alpha_type: peniko::ImageAlphaType::Alpha,
+        width,
+        height,
+    };
     img_dynamic(move || image.clone())
 }
 
-pub(crate) fn img_dynamic(image: impl Fn() -> peniko::Image + 'static) -> Img {
+pub(crate) fn img_dynamic(image: impl Fn() -> peniko::ImageData + 'static) -> Img {
     let id = ViewId::new();
     create_effect(move |_| {
         id.update_state(image());
@@ -213,7 +225,7 @@ impl View for Img {
     }
 
     fn update(&mut self, _cx: &mut crate::context::UpdateCx, state: Box<dyn std::any::Any>) {
-        if let Ok(img) = state.downcast::<peniko::Image>() {
+        if let Ok(img) = state.downcast::<peniko::ImageData>() {
             let mut hasher = Sha256::new();
             hasher.update(img.data.data());
             self.img_hash = Some(hasher.finalize().to_vec());

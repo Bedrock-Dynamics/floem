@@ -434,7 +434,7 @@ impl floem_renderer::Renderer for Renderer {
         }
     }
 
-    fn finish(&mut self) -> Option<peniko::Image> {
+    fn finish(&mut self) -> Option<peniko::ImageData> {
         match self {
             #[cfg(feature = "vello")]
             Renderer::Vello(r) => r.finish(),

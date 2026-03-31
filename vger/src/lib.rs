@@ -136,25 +136,25 @@ impl VgerRenderer {
         let paint = match brush.into() {
             BrushRef::Solid(color) => self.vger.color_paint(vger_color(color)),
             BrushRef::Gradient(g) => match g.kind {
-                GradientKind::Linear { start, end } => {
+                GradientKind::Linear(pos) => {
                     let mut stops = g.stops.iter();
                     let first_stop = stops.next()?;
                     let second_stop = stops.next()?;
                     let inner_color = vger_color(first_stop.color.to_alpha_color());
                     let outer_color = vger_color(second_stop.color.to_alpha_color());
                     let start = floem_vger_rs::defs::LocalPoint::new(
-                        start.x as f32 * first_stop.offset,
-                        start.y as f32 * first_stop.offset,
+                        pos.start.x as f32 * first_stop.offset,
+                        pos.start.y as f32 * first_stop.offset,
                     );
                     let end = floem_vger_rs::defs::LocalPoint::new(
-                        end.x as f32 * second_stop.offset,
-                        end.y as f32 * second_stop.offset,
+                        pos.end.x as f32 * second_stop.offset,
+                        pos.end.y as f32 * second_stop.offset,
                     );
                     self.vger
                         .linear_gradient(start, end, inner_color, outer_color, 0.0)
                 }
-                GradientKind::Radial { .. } => return None,
-                GradientKind::Sweep { .. } => return None,
+                GradientKind::Radial(_) => return None,
+                GradientKind::Sweep(_) => return None,
             },
             BrushRef::Image(_) => return None,
         };
@@ -184,7 +184,7 @@ impl VgerRenderer {
         floem_vger_rs::defs::LocalRect::new(origin, size)
     }
 
-    fn render_image(&mut self) -> Option<peniko::Image> {
+    fn render_image(&mut self) -> Option<peniko::ImageData> {
         let width_align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1;
         let width = (self.config.width + width_align) & !width_align;
         let height = self.config.height;
@@ -245,7 +245,7 @@ impl VgerRenderer {
         );
         let command_buffer = encoder.finish();
         self.queue.submit(Some(command_buffer));
-        self.device.poll(wgpu::Maintain::Wait);
+        self.device.poll(wgpu::PollType::wait_indefinitely()).ok();
 
         let slice = buffer.slice(..);
         let (tx, rx) = sync_channel(1);
@@ -255,7 +255,11 @@ impl VgerRenderer {
             if let Ok(r) = rx.try_recv() {
                 break r.ok()?;
             }
-            if let wgpu::MaintainResult::Ok = self.device.poll(wgpu::MaintainBase::Wait) {
+            if self
+                .device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .map_or(false, |s| s.wait_finished())
+            {
                 rx.recv().ok()?.ok()?;
                 break;
             }
@@ -271,12 +275,13 @@ impl VgerRenderer {
             cursor += bytes_per_row as usize;
         }
 
-        Some(peniko::Image::new(
-            Blob::new(Arc::new(cropped_buffer)),
-            peniko::ImageFormat::Rgba8,
-            self.config.width,
+        Some(peniko::ImageData {
+            data: Blob::new(Arc::new(cropped_buffer)),
+            format: peniko::ImageFormat::Rgba8,
+            alpha_type: peniko::ImageAlphaType::Alpha,
+            width: self.config.width,
             height,
-        ))
+        })
         // RgbaImage::from_raw(self.config.width, height, cropped_buffer).map(DynamicImage::ImageRgba8)
     }
 }
@@ -681,7 +686,7 @@ impl Renderer for VgerRenderer {
         self.clip = None;
     }
 
-    fn finish(&mut self) -> Option<peniko::Image> {
+    fn finish(&mut self) -> Option<peniko::ImageData> {
         if self.capture {
             self.render_image()
         } else {
@@ -693,6 +698,7 @@ impl Renderer for VgerRenderer {
                     label: None,
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &texture_view,
+                        depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),

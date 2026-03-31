@@ -26,7 +26,7 @@ rust-version = "1.86"
 license.workspace = true
 
 [workspace.dependencies]
-peniko = { version = "0.4.0" }
+peniko = { version = "0.6.0" }
 serde = { version = "1.0" }
 lapce-xi-rope = { version = "0.3.2" }
 strum = { version = "0.27", features = ["derive"] }
@@ -34,9 +34,9 @@ strum_macros = { version = "0.27" }
 # Image format features are defined via new features
 image = { version = "0.25", default-features = false }
 im = { version = "15.1.0" }
-resvg = { version = "0.45.1" }
+resvg = { version = "0.46.0" }
 raw-window-handle = "0.6.0"
-wgpu = { version = "24.0.5" }
+wgpu = { version = "27" }
 parking_lot = { version = "0.12" }
 swash = { version = "0.2.5" }
 muda = { git = "https://github.com/tauri-apps/muda", rev = "8e986af3cea96a729413abc75c3702dec3990bd2", default-features = false }

@@ -150,7 +150,7 @@ pub struct Capture {
     pub taffy_duration: Duration,
     pub taffy_node_count: usize,
     pub taffy_depth: usize,
-    pub window: Option<peniko::Image>,
+    pub window: Option<peniko::ImageData>,
     pub window_size: Size,
     pub scale: f64,
     pub state: CaptureState,

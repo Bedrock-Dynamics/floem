@@ -653,7 +653,7 @@ impl<W: raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle
         self.layers.iter_mut().for_each(|l| l.clear_clip());
     }
 
-    fn finish(&mut self) -> Option<peniko::Image> {
+    fn finish(&mut self) -> Option<peniko::ImageData> {
         // Remove cache entries which were not accessed.
         IMAGE_CACHE.with_borrow_mut(|ic| ic.retain(|_, (c, _)| *c == self.cache_color));
         GLYPH_CACHE.with_borrow_mut(|gc| gc.retain(|_, (c, _)| *c == self.cache_color));
@@ -751,30 +751,25 @@ fn brush_to_paint<'b>(brush: impl Into<BrushRef<'b>>) -> Option<Paint<'static>> 
                 .map(|s| GradientStop::new(s.offset, to_color(s.color.to_alpha_color())))
                 .collect();
             match g.kind {
-                GradientKind::Linear { start, end } => LinearGradient::new(
-                    to_point(start),
-                    to_point(end),
+                GradientKind::Linear(pos) => LinearGradient::new(
+                    to_point(pos.start),
+                    to_point(pos.end),
                     stops,
                     SpreadMode::Pad,
                     Transform::identity(),
                 )?,
-                GradientKind::Radial {
-                    start_center,
-                    start_radius: _,
-                    end_center,
-                    end_radius,
-                } => {
+                GradientKind::Radial(pos) => {
                     // FIXME: Doesn't use `start_radius`
                     RadialGradient::new(
-                        to_point(start_center),
-                        to_point(end_center),
-                        end_radius,
+                        to_point(pos.start_center),
+                        to_point(pos.end_center),
+                        pos.end_radius,
                         stops,
                         SpreadMode::Pad,
                         Transform::identity(),
                     )?
                 }
-                GradientKind::Sweep { .. } => return None,
+                GradientKind::Sweep(_) => return None,
             }
         }
         BrushRef::Image(_) => return None,
@@ -809,11 +804,6 @@ enum BlendStrategy {
 fn determine_blend_strategy(peniko_mode: &BlendMode) -> BlendStrategy {
     match (peniko_mode.mix, peniko_mode.compose) {
         (Mix::Normal, compose) => BlendStrategy::SinglePass(compose_to_tiny_blend_mode(compose)),
-        (Mix::Clip, compose) => BlendStrategy::MultiPass {
-            first_pass: compose_to_tiny_blend_mode(compose),
-            second_pass: TinyBlendMode::Source,
-        },
-
         (mix, Compose::SrcOver) => BlendStrategy::SinglePass(mix_to_tiny_blend_mode(mix)),
 
         (mix, compose) => BlendStrategy::MultiPass {
@@ -860,7 +850,7 @@ fn mix_to_tiny_blend_mode(mix: Mix) -> TinyBlendMode {
         Mix::Saturation => TinyBlendMode::Saturation,
         Mix::Color => TinyBlendMode::Color,
         Mix::Luminosity => TinyBlendMode::Luminosity,
-        Mix::Clip => TinyBlendMode::SourceOver,
+        _ => TinyBlendMode::SourceOver,
     }
 }
 

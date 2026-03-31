@@ -5,7 +5,10 @@ use floem_renderer::text::{LineHeightValue, Weight};
 use im_rc::hashmap::Entry;
 use peniko::color::{palette, HueDirection};
 use peniko::kurbo::{Point, Stroke};
-use peniko::{Brush, Color, ColorStop, ColorStops, Gradient, GradientKind};
+use peniko::{
+    Brush, Color, ColorStop, ColorStops, Gradient, GradientKind,
+    LinearGradientPosition,
+};
 use rustc_hash::FxHasher;
 use std::any::{type_name, Any};
 use std::collections::HashMap;
@@ -251,12 +254,12 @@ impl StylePropValue for Gradient {
         let box_height = 14.;
         let mut grad = self.clone();
         grad.kind = match grad.kind {
-            GradientKind::Linear { start, end } => {
-                let dx = end.x - start.x;
-                let dy = end.y - start.y;
+            GradientKind::Linear(pos) => {
+                let dx = pos.end.x - pos.start.x;
+                let dy = pos.end.y - pos.start.y;
 
-                let scale_x = box_width / dx.abs();
-                let scale_y = box_height / dy.abs();
+                let scale_x: f64 = box_width / dx.abs();
+                let scale_y: f64 = box_height / dy.abs();
                 let scale = scale_x.min(scale_y);
 
                 let new_dx = dx * scale;
@@ -272,10 +275,12 @@ impl StylePropValue for Gradient {
                     y: new_start.y + new_dy,
                 };
 
-                GradientKind::Linear {
-                    start: new_start,
-                    end: new_end,
-                }
+                GradientKind::Linear(
+                    LinearGradientPosition {
+                        start: new_start,
+                        end: new_end,
+                    },
+                )
             }
             _ => grad.kind,
         };
@@ -458,6 +463,8 @@ impl StylePropValue for Brush {
                     extend: gradient.extend,
                     interpolation_cs: gradient.interpolation_cs,
                     hue_direction: gradient.hue_direction,
+                    interpolation_alpha_space: gradient
+                        .interpolation_alpha_space,
                     stops: ColorStops::from(&*interpolated_stops),
                 }))
             }
@@ -479,6 +486,8 @@ impl StylePropValue for Brush {
                     extend: gradient.extend,
                     interpolation_cs: gradient.interpolation_cs,
                     hue_direction: gradient.hue_direction,
+                    interpolation_alpha_space: gradient
+                        .interpolation_alpha_space,
                     stops: ColorStops::from(&*interpolated_stops),
                 }))
             }
