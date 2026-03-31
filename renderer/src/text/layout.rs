@@ -2,22 +2,49 @@ use std::{ops::Range, sync::LazyLock};
 
 use crate::text::AttrsList;
 use cosmic_text::{
-    Affinity, Align, Buffer, BufferLine, Cursor, FontSystem, LayoutCursor, LayoutGlyph, LineEnding,
-    LineIter, Metrics, Scroll, Shaping, Wrap,
+    fontdb, Affinity, Align, Buffer, BufferLine,
+    Cursor, FontSystem, LayoutCursor, LayoutGlyph,
+    LineEnding, LineIter, Metrics, Scroll, Shaping,
+    Wrap,
 };
 use parking_lot::Mutex;
 use peniko::kurbo::{Point, Size};
 
-pub static FONT_SYSTEM: LazyLock<Mutex<FontSystem>> = LazyLock::new(|| {
-    let mut font_system = FontSystem::new();
-    #[cfg(target_os = "macos")]
-    font_system.db_mut().set_sans_serif_family("Helvetica Neue");
-    #[cfg(target_os = "windows")]
-    font_system.db_mut().set_sans_serif_family("Segoe UI");
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    font_system.db_mut().set_sans_serif_family("Noto Sans");
-    Mutex::new(font_system)
-});
+pub static FONT_SYSTEM: LazyLock<Mutex<FontSystem>> =
+    LazyLock::new(|| {
+        // On wasm32 FontSystem::new() scans the
+        // (nonexistent) filesystem. Create with an
+        // empty database instead — callers must load
+        // fonts via FONT_SYSTEM.lock().db_mut()
+        // .load_font_data().
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut font_system = FontSystem::new();
+        #[cfg(target_arch = "wasm32")]
+        let mut font_system = {
+            let db = fontdb::Database::new();
+            FontSystem::new_with_locale_and_db(
+                "en-US".to_string(),
+                db,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        font_system
+            .db_mut()
+            .set_sans_serif_family("Helvetica Neue");
+        #[cfg(target_os = "windows")]
+        font_system
+            .db_mut()
+            .set_sans_serif_family("Segoe UI");
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "windows",
+            target_arch = "wasm32"
+        )))]
+        font_system
+            .db_mut()
+            .set_sans_serif_family("Noto Sans");
+        Mutex::new(font_system)
+    });
 
 /// A line of visible text for rendering
 #[derive(Debug)]
