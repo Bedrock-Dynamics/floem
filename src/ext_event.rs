@@ -12,9 +12,15 @@ use crate::{
     Application,
 };
 
-#[cfg(feature = "crossbeam")]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    feature = "crossbeam"
+))]
 use crossbeam::channel::Receiver;
-#[cfg(not(feature = "crossbeam"))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(feature = "crossbeam")
+))]
 use std::sync::mpsc::Receiver;
 
 /// # SAFETY
@@ -126,7 +132,14 @@ pub fn create_ext_action<T: Send + 'static>(
     }
 }
 
-pub fn update_signal_from_channel<T: Send + 'static>(
+// Thread-based channel functions are not available on
+// wasm32 since std::thread::spawn panics there.
+// Use `create_signal_from_stream` (futures feature)
+// as the wasm32 alternative.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn update_signal_from_channel<
+    T: Send + 'static,
+>(
     writer: WriteSignal<Option<T>>,
     rx: Receiver<T>,
 ) {
@@ -140,7 +153,9 @@ pub fn update_signal_from_channel<T: Send + 'static>(
         let data = data.clone();
         cx.create_effect(move |_| {
             trigger.track();
-            while let Some(value) = data.lock().pop_front() {
+            while let Some(value) =
+                data.lock().pop_front()
+            {
                 writer.set(value);
             }
 
@@ -163,7 +178,16 @@ pub fn update_signal_from_channel<T: Send + 'static>(
     });
 }
 
-pub fn create_signal_from_channel<T: Send + 'static>(rx: Receiver<T>) -> ReadSignal<Option<T>> {
+// Thread-based channel functions are not available on
+// wasm32 since std::thread::spawn panics there.
+// Use `create_signal_from_stream` (futures feature)
+// as the wasm32 alternative.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn create_signal_from_channel<
+    T: Send + 'static,
+>(
+    rx: Receiver<T>,
+) -> ReadSignal<Option<T>> {
     let cx = Scope::new();
     let trigger = with_scope(cx, ExtSendTrigger::new);
 
@@ -175,7 +199,9 @@ pub fn create_signal_from_channel<T: Send + 'static>(rx: Receiver<T>) -> ReadSig
         let data = data.clone();
         cx.create_effect(move |_| {
             trigger.track();
-            while let Some(value) = data.lock().pop_front() {
+            while let Some(value) =
+                data.lock().pop_front()
+            {
                 write.set(value);
             }
 
